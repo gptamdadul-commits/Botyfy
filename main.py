@@ -1,171 +1,129 @@
-import os
-import shutil
-import asyncio
-import random
+import os, asyncio, random, shutil
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import FloodWait
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from flask import Flask
 from threading import Thread
 
-# --- Flask Server (UptimeRobot এর মাধ্যমে ২৪/৭ সচল রাখার জন্য) ---
-app = Flask('')
+# --- কনফিগারেশন (Koyeb Env থেকে আসবে) ---
+API_ID = int(os.environ.get("API_ID"))
+API_HASH = os.environ.get("API_HASH")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+STRING_SESSION = os.environ.get("STRING_SESSION")
+ADMIN_ID = int(os.environ.get("ADMIN_ID"))
+TARGET_BOT = "@Sami_bideshbot"
 
+# ক্লায়েন্ট সেটআপ
+user_app = Client("user_session", api_id=API_ID, api_hash=API_HASH, session_string=STRING_SESSION)
+bot_app = Client("bot_manager", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+
+# ডেটাবেস ও স্ট্যাটাস (রিস্টার্ট দিলে রিসেট হবে)
+CHANNELS = []
+CURRENT_CHANNEL_INDEX = 0
+IS_PAUSED = False
+TOTAL_SENT = 0
+
+# মেমোরি খালি করার জন্য ডাউনলোড ফোল্ডার পরিষ্কার করা
+if os.path.exists("downloads"):
+    shutil.rmtree("downloads")
+os.makedirs("downloads")
+
+# --- ওয়েব সার্ভার (Health Check) ---
+app = Flask(__name__)
 @app.route('/')
-def home():
-    return "Bot is alive and running!"
+def home(): return "Bot is Active!"
 
-def run_web():
-    app.run(host='0.0.0.0', port=8080)
+def run_web(): app.run(host="0.0.0.0", port=8080)
 
-def keep_alive():
-    t = Thread(target=run_web)
-    t.start()
-
-# --- কনফিগারেশন (Koyeb এর Environment Variables থেকে তথ্য নিবে) ---
-API_ID = int(os.environ.get("API_ID", "0"))
-API_HASH = os.environ.get("API_HASH", "")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-STRING_SESSION = os.environ.get("STRING_SESSION", "")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0")) # আপনার নিজের আইডি
-
-DOWNLOAD_DIR = "./downloads/"
-STATE_FILE = "bot_state.txt" 
-
-# ক্লায়েন্ট সেটআপ
-user_app = Client("user_session", api_id=API_ID, api_hash=API_HASH, session_string=STRING_SESSION, in_memory=True)
-bot_app = Client("bot_session", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, in_memory=True)
-
-def clear_storage():
-    """পুরো ডাউনলোড ফোল্ডার পরিষ্কার করা"""
-    if os.path.exists(DOWNLOAD_DIR):
+# --- মূল লজিক (ডাউনলোড ও ফরোয়ার্ড) ---
+async def auto_worker():
+    global CURRENT_CHANNEL_INDEX, TOTAL_SENT, IS_PAUSED
+    
+    while True:
+        if IS_PAUSED or not CHANNELS:
+            await asyncio.sleep(30)
+            continue
+            
+        current_target = CHANNELS[CURRENT_CHANNEL_INDEX]
+        await bot_app.send_message(ADMIN_ID, f"🚀 কাজ শুরু: {current_target} থেকে ১০টি ভিডিও নেওয়া হচ্ছে...")
+        
+        sent_count = 0
         try:
-            shutil.rmtree(DOWNLOAD_DIR)
-        except:
-            pass
-    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-
-def save_state(link, current_count, end_num):
-    """বট বন্ধ হলে কোন ফাইল পর্যন্ত প্রসেস হয়েছে তা সেভ রাখা"""
-    with open(STATE_FILE, "w") as f:
-        f.write(f"{link}|{current_count}|{end_num}")
-
-def load_state():
-    """পুরানো অসমাপ্ত কাজ চেক করা"""
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r") as f:
-                data = f.read().split("|")
-                return data[0], int(data[1]), int(data[2])
-        except:
-            return None
-    return None
-
-# --- হ্যান্ডলার (শুধুমাত্র আপনি ব্যবহার করতে পারবেন) ---
-
-@bot_app.on_message(filters.command("start") & filters.user(ADMIN_ID))
-async def start(client, message):
-    clear_storage()
-    btn = None
-    state = load_state()
-    if state:
-        btn = InlineKeyboardMarkup([[InlineKeyboardButton("Resume Last Task", callback_data="resume")]])
-    
-    await message.reply(
-        "বট রেডি! আমি র্যান্ডম ডিলে (১-২ মিনিট) নিয়ে কাজ করব যাতে আপনার আইডি নিরাপদ থাকে।\n\n"
-        "নিয়ম: `লিঙ্ক` `শুরু` `শেষ` লিখে পাঠান।\n"
-        "উদাহরণ: `https://t.me/channel 1 50`", 
-        reply_markup=btn
-    )
-
-@bot_app.on_callback_query(filters.regex("resume") & filters.user(ADMIN_ID))
-async def resume_task(client, callback):
-    state = load_state()
-    if state:
-        link, current, end = state
-        await callback.message.edit_text(f"রিসিউম করা হচ্ছে: {link}\n{current} নম্বর ফাইল থেকে শুরু হচ্ছে...")
-        await start_processing(callback.message, link, current, end)
-    else:
-        await callback.answer("কোনো পুরানো টাস্ক পাওয়া যায়নি।", show_alert=True)
-
-@bot_app.on_message(filters.text & filters.private & filters.user(ADMIN_ID))
-async def handle_input(client, message):
-    input_data = message.text.split()
-    if len(input_data) < 3:
-        return await message.reply("সঠিক নিয়ম: `লিঙ্ক` `শুরু` `শেষ` দিন।")
-
-    link, start_num, end_num = input_data[0], int(input_data[1]), int(input_data[2])
-    await start_processing(message, link, start_num, end_num)
-
-async def start_processing(message, link, start_num, end_num):
-    target_bot = "Sami_bideshbot"
-    status_msg = await message.reply("কাজ শুরু হচ্ছে... অনুগ্রহ করে অপেক্ষা করুন।")
-    
-    # চ্যাট আইডি বের করা
-    if "t.me/c/" in link:
-        parts = link.split('/')
-        chat_id = int("-100" + parts[parts.index("c") + 1])
-    else:
-        chat_id = link.split('/')[-1]
-    
-    processed_now = 0
-    current_media_index = 0
-
-    try:
-        async for msg in user_app.get_chat_history(chat_id):
-            if msg.video or msg.document or msg.photo or msg.animation:
-                current_media_index += 1
-                
-                if current_media_index < start_num:
-                    continue
-                if current_media_index > end_num:
+            # শেষ থেকে শুরু করার জন্য get_chat_history
+            async for message in user_app.get_chat_history(current_target, limit=100):
+                if IS_PAUSED or sent_count >= 10:
                     break
-
-                processed_now += 1
-                save_state(link, current_media_index, end_num)
-
-                await status_msg.edit(f"প্রসেস হচ্ছে: {current_media_index} নং ফাইল।\nএই সেশনে পাঠানো হয়েছে: {processed_now} টি।")
-
-                try:
-                    # ১. ডাউনলোড
-                    file_path = await user_app.download_media(msg, file_name=DOWNLOAD_DIR)
-                    if file_path and os.path.exists(file_path):
-                        caption = msg.caption or ""
-                        
-                        # ২. আপনাকে পাঠানো
-                        if msg.video: await bot_app.send_video(ADMIN_ID, video=file_path, caption=caption)
-                        elif msg.document: await bot_app.send_document(ADMIN_ID, document=file_path, caption=caption)
-                        elif msg.photo: await bot_app.send_photo(ADMIN_ID, photo=file_path, caption=caption)
-                        elif msg.animation: await bot_app.send_animation(ADMIN_ID, animation=file_path, caption=caption)
-
-                        # ৩. অন্য বটে পাঠানো
-                        try:
-                            if msg.video: await user_app.send_video(target_bot, video=file_path, caption=caption)
-                            elif msg.document: await user_app.send_document(target_bot, document=file_path, caption=caption)
-                            elif msg.photo: await user_app.send_photo(target_bot, photo=file_path, caption=caption)
-                            elif msg.animation: await user_app.send_animation(target_bot, animation=file_path, caption=caption)
-                        except: pass
-                        
-                        # ৪. সাথে সাথে ডিলিট
+                
+                if message.video:
+                    file_path = await user_app.download_media(message, file_name="downloads/")
+                    await bot_app.send_video(TARGET_BOT, video=file_path, caption=f"From: {current_target}")
+                    
+                    # ফাইল ডিলিট করে মেমোরি খালি করা
+                    if os.path.exists(file_path):
                         os.remove(file_path)
                     
-                    # র্যান্ডম ডিলে (৬০ থেকে ১২০ সেকেন্ড) যাতে আইডি নিরাপদ থাকে
-                    delay = random.randint(60, 120)
-                    await asyncio.sleep(delay)
+                    sent_count += 1
+                    TOTAL_SENT += 1
+                    await asyncio.sleep(random.randint(60, 120)) # সেফটি ডিলে
 
-                except FloodWait as e:
-                    await status_msg.edit(f"টেলিগ্রাম লিমিট দিয়েছে। {e.value} সেকেন্ড অপেক্ষা করছি...")
-                    await asyncio.sleep(e.value)
-                except Exception as e:
-                    print(f"Error processing file: {e}")
+            # পরবর্তী চ্যানেলে যাওয়ার লজিক
+            CURRENT_CHANNEL_INDEX = (CURRENT_CHANNEL_INDEX + 1) % len(CHANNELS)
+            
+        except Exception as e:
+            await bot_app.send_message(ADMIN_ID, f"❌ এরর ({current_target}): {str(e)}")
+            CURRENT_CHANNEL_INDEX = (CURRENT_CHANNEL_INDEX + 1) % len(CHANNELS)
 
-        await status_msg.edit(f"সফলভাবে শেষ হয়েছে! মোট {processed_now}টি ফাইল পাঠানো হয়েছে।")
-        if os.path.exists(STATE_FILE): os.remove(STATE_FILE)
+        await bot_app.send_message(ADMIN_ID, f"✅ ১০টি ভিডিও শেষ। পরবর্তী ১ ঘণ্টা বিরতি...")
+        await asyncio.sleep(3600)
 
-    except Exception as e:
-        await status_msg.edit(f"মারাত্মক ত্রুটি: {str(e)}")
+# --- অ্যাডমিন প্যানেল কমান্ডস ---
+@bot_app.on_message(filters.command("admin") & filters.user(ADMIN_ID))
+async def admin_panel(client, message):
+    buttons = [
+        [InlineKeyboardButton("➕ চ্যানেল যোগ করুন", callback_data="add_ch"), InlineKeyboardButton("📜 চ্যানেল লিস্ট", callback_data="list_ch")],
+        [InlineKeyboardButton("⏸ পজ", callback_data="pause"), InlineKeyboardButton("▶️ রিজুম", callback_data="resume")],
+        [InlineKeyboardButton("📊 স্ট্যাটাস", callback_data="status"), InlineKeyboardButton("⚡ ফোর্স স্টার্ট", callback_data="force")]
+    ]
+    await message.reply("🛠 **এডমিন কন্ট্রোল প্যানেল**", reply_markup=InlineKeyboardMarkup(buttons))
+
+@bot_app.on_callback_query()
+async def handle_buttons(client, query):
+    global IS_PAUSED, CHANNELS, TOTAL_SENT
+    
+    if query.data == "add_ch":
+        await query.message.reply("চ্যানেল যোগ করতে লিখুন: `/add লিংক_বা_আইডি` \nউদাহরণ: `/add -10012345678` ")
+    
+    elif query.data == "list_ch":
+        ch_list = "\n".join(CHANNELS) if CHANNELS else "কোনো চ্যানেল নেই।"
+        await query.message.reply(f"📁 **আপনার চ্যানেলসমূহ:**\n{ch_list}")
+    
+    elif query.data == "status":
+        status_text = "⏸ পজ করা" if IS_PAUSED else "▶️ চলছে"
+        await query.answer(f"অবস্থা: {status_text}\nমোট পাঠানো হয়েছে: {TOTAL_SENT}টি", show_alert=True)
+    
+    elif query.data == "pause":
+        IS_PAUSED = True
+        await query.answer("বট পজ করা হয়েছে।")
+    
+    elif query.data == "resume":
+        IS_PAUSED = False
+        await query.answer("বট আবার চালু হয়েছে।")
+
+@bot_app.on_message(filters.command("add") & filters.user(ADMIN_ID))
+async def add_logic(client, message):
+    try:
+        new_ch = message.text.split(None, 1)[1]
+        CHANNELS.append(new_ch)
+        await message.reply(f"✅ {new_ch} লিস্টে যোগ করা হয়েছে।")
+    except:
+        await message.reply("ভুল ফরম্যাট! `/add link` এভাবে লিখুন।")
+
+# --- বট স্টার্ট ---
+async def start_all():
+    Thread(target=run_web).start()
+    await user_app.start()
+    await bot_app.start()
+    await bot_app.send_message(ADMIN_ID, "🤖 বট সচল হয়েছে! এখন /admin লিখে চ্যানেল যোগ করুন।")
+    await auto_worker()
 
 if __name__ == "__main__":
-    keep_alive() # ওয়েব সার্ভার চালু
-    user_app.start()
-    bot_app.run()
+    asyncio.get_event_loop().run_until_complete(start_all())
