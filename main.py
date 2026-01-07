@@ -7,7 +7,7 @@ from pyrogram.errors import FloodWait, PeerIdInvalid, RPCError, UserNotParticipa
 from flask import Flask
 from threading import Thread
 
-# --- ১. কনফিগারেশন (Koyeb Environment Variables) ---
+# --- কনফিগারেশন ---
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -17,7 +17,6 @@ TARGET_BOT = os.environ.get("TARGET_BOT")
 
 DOWNLOAD_DIR = "./downloads/"
 
-# আপনার পুরনো কোডের স্টাইলে স্টোরেজ ক্লিনআপ
 def clear_storage():
     if os.path.exists(DOWNLOAD_DIR):
         try: shutil.rmtree(DOWNLOAD_DIR)
@@ -26,18 +25,31 @@ def clear_storage():
 
 clear_storage()
 
-# --- ২. ক্লায়েন্ট সেটআপ ---
-# in_memory=True ব্যবহার করা হয়েছে যাতে সেশন ডাটাবেজ ফাইল ক্র্যাশ না করে
-user = Client("user_session", api_id=API_ID, api_hash=API_HASH, session_string=STRING_SESSION, in_memory=True)
-bot = Client("bot_session", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, in_memory=True)
+# --- ক্লায়েন্ট সেটআপ (সুরক্ষিত কনফিগারেশন সহ) ---
+# in_memory=True এবং workers=1 ব্যবহার করা হয়েছে যাতে ব্যাকগ্রাউন্ড টাস্ক কম থাকে
+user = Client(
+    "user_session", 
+    api_id=API_ID, 
+    api_hash=API_HASH, 
+    session_string=STRING_SESSION, 
+    in_memory=True,
+    workers=2
+)
+bot = Client(
+    "bot_session", 
+    api_id=API_ID, 
+    api_hash=API_HASH, 
+    bot_token=BOT_TOKEN, 
+    in_memory=True
+)
 
-# --- ৩. হেল্পার (Flask Server) ---
+# --- Flask Server ---
 app = Flask(__name__)
 @app.route('/')
 def home(): return "Bot is alive!"
 def run_flask(): app.run(host='0.0.0.0', port=8080)
 
-# --- ৪. আধুনিক প্রগ্রেস বার লজিক ---
+# --- প্রগ্রেস বার ---
 async def progress_bar(current, total, status_msg, start_time, action):
     now = time.time()
     diff = now - start_time
@@ -52,87 +64,73 @@ async def progress_bar(current, total, status_msg, start_time, action):
         try: await status_msg.edit(tmp)
         except: pass
 
-# --- ৫. মেইন টাস্ক হ্যান্ডলার ---
+# --- মেইন টাস্ক হ্যান্ডলার ---
 @bot.on_message(filters.command("start_job") & filters.user(ADMIN_ID))
 async def start_job_handler(client, message):
-    status_msg = await message.reply("📡 **আইডি ভেরিফাই করা হচ্ছে...**")
+    status_msg = await message.reply("📡 **সার্ভার চেক করা হচ্ছে...**")
     
     try:
-        # ইনপুট চেক
         args = message.text.split()
         if len(args) < 4:
-            await status_msg.edit("❌ **ভুল ফরম্যাট!**\nব্যবহার করুন: `/start_job [Chat_ID] [Start_ID] [Count]`")
+            await status_msg.edit("❌ ফরম্যাট: `/start_job [ID] [Start_ID] [Count]`")
             return
 
         chat_id = args[1]
         try: chat_id = int(chat_id)
-        except: pass # ইউজারনেম হলে স্ট্রিং হিসেবে থাকবে
+        except: pass
         
         start_id = int(args[2])
         count = int(args[3])
 
-        # --- আইডি কানেকশন নিশ্চিত করা (Error Handling) ---
+        # আইডি রিজলভ করার চেষ্টা
         try:
-            # সোর্স চ্যাট চেক
             source_chat = await user.get_chat(chat_id)
-            
-            # টার্গেট আইডি চেক (Environment Variable থেকে)
             t_input = int(TARGET_BOT) if TARGET_BOT.replace("-","").isdigit() else TARGET_BOT.replace("@","")
             target_user = await user.get_users(t_input)
             target_id = target_user.id
-            
-            # সেশনের সাথে টার্গেট বটের সংযোগ তৈরির চেষ্টা
             await user.send_chat_action(target_id, "typing")
             
-        except (PeerIdInvalid, UsernameInvalid):
-            await status_msg.edit(f"❌ **Invalid ID/Username!**\n\n**সমাধান:**\n১. সেশন একাউন্ট দিয়ে চ্যানেলে জয়েন করুন।\n২. সেশন একাউন্ট দিয়ে টার্গেট বটকে একটি মেসেজ দিন।")
-            return
-        except UserNotParticipant:
-            await status_msg.edit(f"❌ **সেশন একাউন্ট জয়েন নেই!**\nচ্যানেল আইডি: `{chat_id}`")
+        except (PeerIdInvalid, UsernameInvalid, KeyError):
+            await status_msg.edit(f"❌ **আইডি ইনভ্যালিড!**\nদয়া করে সঠিক আইডি দিন এবং সেশন একাউন্ট দিয়ে চ্যানেলে জয়েন করুন।")
             return
         except Exception as e:
-            await status_msg.edit(f"⚠️ **কানেকশন এরর:** `{str(e)}` \nসঠিক আইডি দিন।")
+            await status_msg.edit(f"⚠️ **কানেকশন এরর:** `{str(e)}`")
             return
 
-        await status_msg.edit(f"✅ **চ্যানেল:** {source_chat.title}\n🚀 সিরিয়াল ডাউনলোড শুরু হচ্ছে...")
+        await status_msg.edit(f"✅ **চ্যানেল:** {source_chat.title}\n🚀 কাজ শুরু হচ্ছে...")
 
         for i in range(count):
             current_msg_id = start_id + i
             try:
                 msg = await user.get_messages(chat_id, current_msg_id)
-                
                 if msg and (msg.video or msg.photo or msg.document):
                     start_time = time.time()
-                    # ১. ডাউনলোড
                     file_path = await user.download_media(msg, progress=progress_bar, progress_args=(status_msg, start_time, "ডাউনলোড"))
                     
-                    # ২. আপলোড (টার্গেট বটে)
                     start_time = time.time()
-                    caption = msg.caption or ""
                     if msg.video:
-                        await user.send_video(target_id, video=file_path, caption=caption, progress=progress_bar, progress_args=(status_msg, start_time, "আপলোড"))
+                        await user.send_video(target_id, video=file_path, caption=msg.caption, progress=progress_bar, progress_args=(status_msg, start_time, "আপলোড"))
                     elif msg.photo:
-                        await user.send_photo(target_id, photo=file_path, caption=caption)
+                        await user.send_photo(target_id, photo=file_path, caption=msg.caption)
                     elif msg.document:
-                        await user.send_document(target_id, document=file_path, caption=caption, progress=progress_bar, progress_args=(status_msg, start_time, "আপলোড"))
+                        await user.send_document(target_id, document=file_path, caption=msg.caption, progress=progress_bar, progress_args=(status_msg, start_time, "আপলোড"))
 
-                    # ৩. ফাইল ডিলিট (স্টোরেজ সুরক্ষা)
-                    if os.path.exists(file_path):
-                        os.remove(file_path)
-                    
-                    await asyncio.sleep(2) # FloodWait এড়াতে গ্যাপ
+                    if os.path.exists(file_path): os.remove(file_path)
+                    await asyncio.sleep(2)
                 else:
-                    await status_msg.edit(f"⏩ স্কিপ: `{current_msg_id}` (মিডিয়া নেই)")
+                    await status_msg.edit(f"⏩ স্কিপ: `{current_msg_id}`")
             except Exception:
-                continue # কোনো মেসেজ এরর হলে বট থামবে না, পরের মেসেজে যাবে
+                continue
 
-        await status_msg.edit("🏁 **মিশন সম্পূর্ণ!** সব ফাইল পাঠানো হয়েছে।")
+        await status_msg.edit("🏁 **মিশন সম্পূর্ণ!**")
 
     except Exception as e:
-        await bot.send_message(ADMIN_ID, f"🚨 **মারাত্মক ত্রুটি:** {str(e)}")
+        await bot.send_message(ADMIN_ID, f"🚨 **Error:** {str(e)}")
 
-# --- ৬. রান ---
+# --- রান ---
 if __name__ == "__main__":
     Thread(target=run_flask).start()
+    # সেশন স্টার্ট করার সময় পুরনো আপডেট ইগনোর করার চেষ্টা
+    print("Bot is starting...")
     user.start()
     bot.run()
