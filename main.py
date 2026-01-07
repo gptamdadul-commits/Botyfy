@@ -1,10 +1,9 @@
 import os, asyncio, shutil, json
 from pyrogram import Client, filters, errors
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from flask import Flask
 from threading import Thread
 
-# --- কনফিগারেশন (Koyeb Env Variables) ---
+# --- কনফিগারেশন ---
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -12,171 +11,74 @@ STRING_SESSION = os.environ.get("STRING_SESSION")
 ADMIN_ID = int(os.environ.get("ADMIN_ID"))
 TARGET_BOT = "@Sami_bideshbot"
 
-# সেশন এবং বট ক্লায়েন্ট
 user_app = Client("user_session", api_id=API_ID, api_hash=API_HASH, session_string=STRING_SESSION)
 bot_app = Client("bot_manager", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-
-# বিরতি ভাঙার জন্য ইভেন্ট
-force_event = asyncio.Event()
-DB_FILE = "sent_videos.json"
-
-# JSON ডাটাবেজ লোড
-if os.path.exists(DB_FILE):
-    try:
-        with open(DB_FILE, "r") as f:
-            SENT_DATA = json.load(f)
-    except: SENT_DATA = {}
-else: SENT_DATA = {}
-
-db = {
-    "CHANNELS": [],
-    "CURRENT_INDEX": 0,
-    "IS_PAUSED": False,
-    "TOTAL_SENT": 0,
-    "HOURLY_LIMIT": 10,
-    "SLEEP_GAP": 3600,
-    "VIDEO_DELAY": 60,
-    "STATUS": "চালু হচ্ছে... 🚀"
-}
 
 DOWNLOAD_DIR = "downloads/"
 if not os.path.exists(DOWNLOAD_DIR): os.makedirs(DOWNLOAD_DIR)
 
-def save_data():
-    with open(DB_FILE, "w") as f:
-        json.dump(SENT_DATA, f)
-
-# --- মূল অটোমেশন লজিক ---
-async def auto_worker():
-    while True:
-        if db["IS_PAUSED"] or not db["CHANNELS"]:
-            db["STATUS"] = "বন্ধ অথবা কোনো চ্যানেল নেই ⏸"
-            await asyncio.sleep(10)
-            continue
-            
-        current_target = db["CHANNELS"][db["CURRENT_INDEX"]]
-        db["STATUS"] = f"পুরাতন ভিডিও স্ক্যান করছে: {current_target} 🔍"
+# --- ভিডিও প্রসেসিং ফাংশন ---
+async def process_videos(chat_id, start_id, count):
+    sent = 0
+    try:
+        await bot_app.send_message(ADMIN_ID, f"🚀 কাজ শুরু! চ্যানেল: `{chat_id}` থেকে `{count}`টি ভিডিও নেওয়া হচ্ছে।")
         
-        if current_target not in SENT_DATA:
-            SENT_DATA[current_target] = []
-            save_data()
-
-        sent_count = 0
-        try:
-            # PEER_ID_INVALID ফিক্স করতে আগে চ্যাট ইনফো আপডেট করা
-            try:
-                chat = await user_app.get_chat(current_target)
-                target_id = chat.id
-            except: target_id = current_target
-
-            # পুরাতন থেকে স্ক্যান (offset_id=1)
-            async for message in user_app.get_chat_history(target_id, offset_id=1, limit=500):
-                if db["IS_PAUSED"] or sent_count >= db["HOURLY_LIMIT"]:
-                    break
-                
-                if message.video and str(message.id) not in SENT_DATA[current_target]:
-                    db["STATUS"] = f"ডাউনলোড: {sent_count + 1}/{db['HOURLY_LIMIT']} 📥 (ID: {message.id})"
-                    
-                    file_path = await user_app.download_media(message, file_name=DOWNLOAD_DIR)
-                    # ইউজার সেশন ব্যবহার করে ভিডিও পাঠানো
-                    await user_app.send_video(TARGET_BOT, video=file_path, caption=f"✅ সফলভাবে সংগৃহীত\nউৎস: {current_target}\nআইডি: {message.id}")
-                    
-                    if os.path.exists(file_path): os.remove(file_path) # মেমোরি ক্লিয়ার
-                    
-                    SENT_DATA[current_target].append(str(message.id))
-                    save_data()
-                    
-                    sent_count += 1
-                    db["TOTAL_SENT"] += 1
-                    await asyncio.sleep(db["VIDEO_DELAY"]) 
-
-            db["CURRENT_INDEX"] = (db["CURRENT_INDEX"] + 1) % len(db["CHANNELS"])
+        # offset_id ব্যবহার করে নির্দিষ্ট আইডি থেকে শুরু
+        async for message in user_app.get_chat_history(chat_id, offset_id=int(start_id), limit=500):
+            if sent >= int(count):
+                break
             
-        except errors.FloodWait as e:
-            db["STATUS"] = f"FloodWait: {e.value}s অপেক্ষা করুন ⏳"
-            await asyncio.sleep(e.value) # অটো ফ্লাডওয়েট হ্যান্ডলিং
-        except Exception as e:
-            await bot_app.send_message(ADMIN_ID, f"❌ ত্রুটি ({current_target}): {str(e)}")
-            db["CURRENT_INDEX"] = (db["CURRENT_INDEX"] + 1) % len(db["CHANNELS"])
+            if message.video:
+                file_path = await user_app.download_media(message, file_name=DOWNLOAD_DIR)
+                await user_app.send_video(TARGET_BOT, video=file_path, caption=f"উৎস: {chat_id}\nআইডি: {message.id}")
+                
+                if os.path.exists(file_path): os.remove(file_path) # মেমোরি ক্লিয়ার
+                
+                sent += 1
+                await asyncio.sleep(30) # সেফটি ডিলে
 
-        db["STATUS"] = f"বিরতি... ({db['SLEEP_GAP']//60} মিনিট) ⏳"
-        try:
-            # ফোর্স স্টার্ট বাটন কাজ করবে সাথে সাথে
-            await asyncio.wait_for(force_event.wait(), timeout=db["SLEEP_GAP"])
-        except asyncio.TimeoutError: pass
-        finally: force_event.clear()
+        await bot_app.send_message(ADMIN_ID, f"✅ কাজ শেষ! মোট `{sent}`টি ভিডিও পাঠানো হয়েছে।")
+        
+    except errors.FloodWait as e:
+        await bot_app.send_message(ADMIN_ID, f"⚠️ টেলিগ্রাম ব্লক করেছে! {e.value} সেকেন্ড অপেক্ষা করুন।")
+    except Exception as e:
+        await bot_app.send_message(ADMIN_ID, f"❌ ত্রুটি: {str(e)}")
 
-# --- অ্যাডমিন প্যানেল বাটনসমূহ ---
-def main_markup():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ চ্যানেল যোগ", callback_data="add_ch"), InlineKeyboardButton("🗑 চ্যানেল ডিলিট", callback_data="del_ch")],
-        [InlineKeyboardButton("📊 লাইভ স্ট্যাটাস", callback_data="status"), InlineKeyboardButton("⚡ ফোর্স স্টার্ট", callback_data="force")],
-        [InlineKeyboardButton("⚙️ সেটিংস এডিট", callback_data="settings"), InlineKeyboardButton("📜 লিস্ট", callback_data="list_ch")],
-        [InlineKeyboardButton("⏸ পজ", callback_data="pause"), InlineKeyboardButton("▶️ রিজুম", callback_data="resume")]
-    ])
+# --- কমান্ড হ্যান্ডলার ---
+@bot_app.on_message(filters.command("start_job") & filters.user(ADMIN_ID))
+async def start_job_handler(client, message):
+    try:
+        # ইনপুট ফরম্যাট: /start_job -100123 1 50
+        args = message.text.split()
+        if len(args) < 4:
+            return await message.reply("সঠিকভাবে লিখুন: `/start_job চ্যানেল_আইডি শুরু_আইডি সংখ্যা` \nউদা: `/start_job -1003219361602 1 50` ")
+        
+        chat_id = args[1]
+        start_id = args[2]
+        count = args[3]
+        
+        # ব্যাকগ্রাউন্ডে কাজ শুরু করা
+        asyncio.create_task(process_videos(chat_id, start_id, count))
+        await message.reply(f"⏳ প্রসেসিং শুরু হয়েছে। ভিডিও আইডি `{start_id}` থেকে `{count}`টি ভিডিও চেক করা হচ্ছে।")
+        
+    except Exception as e:
+        await message.reply(f"❌ ভুল হয়েছে: {str(e)}")
 
 @bot_app.on_message(filters.command("admin") & filters.user(ADMIN_ID))
 async def admin_panel(client, message):
-    await message.reply("🛠 **অ্যাডভান্সড বট কন্ট্রোল প্যানেল**", reply_markup=main_markup())
+    await message.reply("🛠 **বট এখন ম্যানুয়াল মোডে সচল**\n\nভিডিও পাঠাতে লিখুন:\n`/start_job চ্যানেল_আইডি শুরু_আইডি সংখ্যা`")
 
-@bot_app.on_callback_query()
-async def cb_handler(client, query):
-    if query.data == "status":
-        txt = f"📈 **বট রিপোর্ট:**\n\n🔹 অবস্থা: {db['STATUS']}\n🔹 মোট পাঠানো: {db['TOTAL_SENT']}টি\n🔹 লিমিট: ঘণ্টায় {db['HOURLY_LIMIT']}টি"
-        await query.message.edit_text(txt, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 ব্যাক", callback_data="back")]]))
-    elif query.data == "force":
-        force_event.set() # স্লিপ ভেঙে কাজ শুরু
-        await query.answer("⚡ ফোর্স স্টার্ট! বিরতি ভাঙা হয়েছে।", show_alert=True)
-    elif query.data == "settings":
-        txt = "⚙️ **সেটিংস পরিবর্তন কমান্ড:**\n\n• `/limit 10` (ভিডিও সংখ্যা)\n• `/delay 60` (ভিডিও গ্যাপ সেকেন্ডে)\n• `/gap 60` (বিরতি মিনিটে)"
-        await query.message.edit_text(txt, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 ব্যাক", callback_data="back")]]))
-    elif query.data == "back":
-        await query.message.edit_text("🛠 **অ্যাডভান্সড বট কন্ট্রোল প্যানেল**", reply_markup=main_markup())
-    elif query.data == "pause": db["IS_PAUSED"] = True; await query.answer("বন্ধ।")
-    elif query.data == "resume": db["IS_PAUSED"] = False; await query.answer("চালু।")
-    elif query.data == "add_ch": await query.message.reply("লিখুন: `/add -100xxxxxx` ")
-    elif query.data == "del_ch": await query.message.reply("লিখুন: `/del -100xxxxxx` ")
-    elif query.data == "list_ch":
-        res = "\n".join([f"• `{ch}`" for ch in db['CHANNELS']]) if db['CHANNELS'] else "কোনো চ্যানেল নেই।"
-        await query.message.edit_text(f"📁 **চ্যানেল তালিকা:**\n{res}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 ব্যাক", callback_data="back")]]))
-
-@bot_app.on_message(filters.command("add") & filters.user(ADMIN_ID))
-async def add_logic(client, message):
-    try:
-        ch = message.text.split()[1]
-        if ch not in db["CHANNELS"]: db["CHANNELS"].append(ch); await message.reply(f"✅ যোগ হয়েছে: `{ch}`")
-        else: await message.reply("⚠️ আগে থেকেই আছে।")
-    except: await message.reply("উদা: `/add -100xxxxxx` ")
-
-@bot_app.on_message(filters.command("del") & filters.user(ADMIN_ID))
-async def del_logic(client, message):
-    try:
-        ch = message.text.split()[1]
-        if ch in db["CHANNELS"]: db["CHANNELS"].remove(ch); await message.reply(f"🗑 মুছে ফেলা হয়েছে: `{ch}`")
-    except: await message.reply("সঠিক আইডি দিন।")
-
-@bot_app.on_message(filters.command(["limit", "delay", "gap"]) & filters.user(ADMIN_ID))
-async def update_settings(client, message):
-    try:
-        val = int(message.text.split()[1])
-        if "limit" in message.text: db["HOURLY_LIMIT"] = val
-        elif "delay" in message.text: db["VIDEO_DELAY"] = val
-        elif "gap" in message.text: db["SLEEP_GAP"] = val * 60
-        await message.reply(f"⚙️ আপডেট হয়েছে: {val}")
-    except: await message.reply("সঠিক সংখ্যা দিন।")
-
-# --- ওয়েব সার্ভার ও হেলথ চেক (Koyeb Stop হওয়া রোধ করতে) ---
+# --- ওয়েব সার্ভার (Koyeb Health Check) ---
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Bot is Alive and Healthy!"
+def home(): return "Bot is Online (Manual Mode)!"
 
 async def start_all():
-    # Flask ওয়েব সার্ভার আলাদা থ্রেডে চালানো যাতে হেলথ চেক পাস হয়
     Thread(target=lambda: app.run(host="0.0.0.0", port=8080)).start()
     await user_app.start()
     await bot_app.start()
-    await bot_app.send_message(ADMIN_ID, "🚀 বট অনলাইন! সব এরর হ্যান্ডলিং যোগ করা হয়েছে।")
-    await auto_worker()
+    await bot_app.send_message(ADMIN_ID, "🚀 বট এখন ম্যানুয়াল মোডে অনলাইন!")
 
 if __name__ == "__main__":
     asyncio.get_event_loop().run_until_complete(start_all())
+    asyncio.get_event_loop().run_forever()
