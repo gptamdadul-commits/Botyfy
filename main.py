@@ -67,8 +67,9 @@ async def auto_worker():
 
         sent_count = 0
         try:
-            # reverse এরর এড়াতে offset_id=1 ব্যবহার করে আইডি ১ থেকে পড়া শুরু করবে
-            async for message in user_app.get_chat_history(current_target, offset_id=1, limit=100, from_id=0):
+            # এরর এড়াতে offset_id ব্যবহার করে আইডি ১ থেকে পড়া শুরু করবে
+            # Pyrogram এর get_chat_history তে offset_id ১ দিলে এটি শুরু থেকে মেসেজ পায়
+            async for message in user_app.get_chat_history(current_target, offset_id=1, limit=100):
                 if db["IS_PAUSED"] or sent_count >= db["HOURLY_LIMIT"]:
                     break
                 
@@ -105,7 +106,6 @@ async def auto_worker():
 
         db["STATUS"] = f"রাউন্ড শেষ। পরবর্তী কাজ {db['SLEEP_GAP']//60} মিনিট পর 😴"
         try:
-            # বিরতি কিন্তু ফোর্স স্টার্ট দিলে ভেঙে যাবে
             await asyncio.wait_for(force_event.wait(), timeout=db["SLEEP_GAP"])
         except asyncio.TimeoutError:
             pass
